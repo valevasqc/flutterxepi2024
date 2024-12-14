@@ -19,7 +19,8 @@ async function fetchImageLinks() {
             imageLinks[folder] = files
                 .filter(file => file.download_url)
                 .reduce((acc, file) => {
-                    acc[file.name.replace(/\.[^/.]+$/, "")] = file.download_url + '?raw=true';
+                    acc[file.name.replace(/\.[^/.]+$/, "s")] = file.download_url + '?raw=true';
+                    // console.log(acc);
                     return acc;
                 }, {});
         }

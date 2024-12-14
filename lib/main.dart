@@ -1,5 +1,3 @@
-import 'dart:js_interop';
-import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'firebase_options.dart';
@@ -66,18 +64,22 @@ class _CategoryGalleryState extends State<CategoryGallery> {
                 value
                     .cast<String, dynamic>()
                     .entries // Convert to iterable of key-value pairs
-                    .where((entry) => entry.value != null) // Filter out null values
+                    // .where((entry) => entry.value != null) // Filter out null values
+
             );
-            print('Fetched data: $data');
-            print('Parsing category: $key');
+
+            // data.remove((key, value) => value == null);
+
+            print(data);
+            // print('Parsing category: $key');
 
             // Only add the category if there are valid entries
             if (filteredValues.isNotEmpty) {
               parsedCategories[key] = filteredValues;
             }
           }
-          print('Fetched data: $data');
-          print('Parsing category: $key');
+          // print('Fetched data: $data');
+          // print('Parsing category: $key');
         });
 
         setState(() {
@@ -180,61 +182,98 @@ class CategoryPage extends StatelessWidget {
         ),
         itemCount: imageUrls.length,
         itemBuilder: (context, index) {
-          return _ExpandableImage(imageUrl: imageUrls[index]);
+          return _ImageThumbnail(
+            imageUrl: imageUrls[index],
+            onTap: () {
+              // Navigate to the full image screen
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => ImageFullScreenPage(imageUrl: imageUrls[index]),
+                ),
+              );
+            },
+          );
         },
       ),
     );
   }
 }
 
-class _ExpandableImage extends StatefulWidget {
+class _ImageThumbnail extends StatelessWidget {
   final String imageUrl;
+  final VoidCallback onTap;
 
-  const _ExpandableImage({super.key, required this.imageUrl});
-
-  @override
-  State<_ExpandableImage> createState() => _ExpandableImageState();
-}
-
-class _ExpandableImageState extends State<_ExpandableImage> {
-  bool _isExpanded = false;
+  const _ImageThumbnail({required this.imageUrl, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      onTap: () {
-        setState(() {
-          _isExpanded = !_isExpanded; // Toggle between expanded and normal size.
-        });
-      },
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 300),
-        decoration: BoxDecoration(
-          border: Border.all(color: Colors.blueAccent),
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: _isExpanded
-            ? Image.network(
-          widget.imageUrl,
-          fit: BoxFit.contain, // Expanded view.
-          loadingBuilder: (context, child, progress) {
-            if (progress == null) return child;
-            return const Center(child: CircularProgressIndicator());
-          },
-          errorBuilder: (context, error, stackTrace) {
-            return const Icon(Icons.error, color: Colors.red); // Error icon.
-          },
-        )
-            : Image.network(
-          widget.imageUrl,
-          fit: BoxFit.cover, // Normal size in the grid.
-          loadingBuilder: (context, child, progress) {
-            if (progress == null) return child;
-            return const Center(child: CircularProgressIndicator());
-          },
-          errorBuilder: (context, error, stackTrace) {
-            return const Icon(Icons.error, color: Colors.red); // Error icon.
-          },
+      onTap: onTap,
+      child: Image.network(
+        imageUrl,
+        fit: BoxFit.cover,
+        loadingBuilder: (context, child, progress) {
+          if (progress == null) return child;
+          return const Center(child: CircularProgressIndicator());
+        },
+        errorBuilder: (context, error, stackTrace) {
+          return const Icon(Icons.error, color: Colors.red);
+        },
+      ),
+    );
+  }
+}
+
+class ImageFullScreenPage extends StatefulWidget {
+  final String imageUrl;
+
+  const ImageFullScreenPage({super.key, required this.imageUrl});
+
+  @override
+  State<ImageFullScreenPage> createState() => _ImageFullScreenPageState();
+}
+
+class _ImageFullScreenPageState extends State<ImageFullScreenPage> {
+  bool _isExpanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        iconTheme: const IconThemeData(color: Colors.white),
+        // actions: [
+        //   IconButton(
+        //     icon: const Icon(Icons.close, color: Colors.white), // Close icon (X)
+        //     onPressed: () {
+        //       Navigator.pop(context); // Close the full-screen view
+        //     },
+        //   ),
+        // ],
+      ),
+      body: GestureDetector(
+        onTap: () {
+          setState(() {
+            _isExpanded = !_isExpanded;
+          });
+        },
+        child: Center(
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 300),
+            child: Image.network(
+              widget.imageUrl,
+              fit: _isExpanded ? BoxFit.contain : BoxFit.cover, // Expanded or normal
+              loadingBuilder: (context, child, progress) {
+                if (progress == null) return child;
+                return const Center(child: CircularProgressIndicator());
+              },
+              errorBuilder: (context, error, stackTrace) {
+                return const Icon(Icons.error, color: Colors.red);
+              },
+            ),
+          ),
         ),
       ),
     );
