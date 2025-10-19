@@ -3,6 +3,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'firebase_options.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 
 // nvm use --lts
 
@@ -44,6 +45,8 @@ class _CategoryGalleryState extends State<CategoryGallery> {
   final databaseRef = FirebaseDatabase.instance
       .ref('images'); // Reference to "images" node in Firebase.
   Map<String, Map<dynamic, dynamic>> categories = {}; // To store category data.
+  Map<String, String?> categoryCoverImages =
+      {}; // To store cover images for each category
 
   @override
   void initState() {
@@ -58,38 +61,59 @@ class _CategoryGalleryState extends State<CategoryGallery> {
       if (snapshot.exists) {
         final data = snapshot.value as Map<dynamic, dynamic>;
         final Map<String, Map<String, dynamic>> parsedCategories = {};
+        final Map<String, String?> parsedCoverImages = {};
 
         data.forEach((key, value) {
           if (value is Map<dynamic, dynamic>) {
-            // Filter out null values here
-            final filteredValues = Map<String, dynamic>.fromEntries(value
-                    .cast<String, dynamic>()
-                    .entries // Convert to iterable of key-value pairs
-                // .where((entry) => entry.value != null) // Filter out null values
+            String? coverImageUrl;
+            final Map<String, dynamic> productImages = {};
 
-                );
+            // Separate cover image from product images
+            value.forEach((subKey, subValue) {
+              if (subKey == 'coverImage') {
+                coverImageUrl = subValue?.toString();
+              } else if (subKey == 'products') {
+                // New structure: products are nested
+                if (subValue is Map<dynamic, dynamic>) {
+                  // Handle as Map
+                  subValue.forEach((productKey, productValue) {
+                    if (productKey != '__placeholder__' &&
+                        productKey != '_empty' &&
+                        productValue != null) {
+                      productImages[productKey.toString()] = productValue;
+                    }
+                  });
+                } else if (subValue is List) {
+                  // Handle as List (Firebase converts numeric keys to List)
+                  for (int i = 0; i < subValue.length; i++) {
+                    if (subValue[i] != null) {
+                      productImages[i.toString()] = subValue[i];
+                    }
+                  }
+                }
+              } else if (subKey != 'coverImage' && subValue != null) {
+                // Old structure: products at top level
+                productImages[subKey.toString()] = subValue;
+              }
+            });
 
-            // data.remove((key, value) => value == null);
-
-            print(data);
-            // print('Parsing category: $key');
-
-            // Only add the category if there are valid entries
-            if (filteredValues.isNotEmpty) {
-              parsedCategories[key] = filteredValues;
+            // Only add the category if there are valid product images
+            if (productImages.isNotEmpty) {
+              parsedCategories[key] = productImages;
+              parsedCoverImages[key] = coverImageUrl;
             }
           }
-          // print('Fetched data: $data');
-          // print('Parsing category: $key');
         });
 
         setState(() {
           categories = parsedCategories;
+          categoryCoverImages = parsedCoverImages;
         });
       } else {
         print('No data available');
         setState(() {
           categories = {};
+          categoryCoverImages = {};
         });
       }
     } catch (e) {
@@ -99,6 +123,9 @@ class _CategoryGalleryState extends State<CategoryGallery> {
 
   @override
   Widget build(BuildContext context) {
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isMobile = screenWidth <= 600;
+
     return Scaffold(
       appBar: AppBar(
         backgroundColor: const Color(0xff2b2b2b),
@@ -106,14 +133,16 @@ class _CategoryGalleryState extends State<CategoryGallery> {
         title: InkWell(
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
+            mainAxisSize: MainAxisSize.min,
             children: [
-              Image.asset('assets/images/logoxepi.jpg', height: 50, width: 50),
-              const SizedBox(width: 7.0),
-              const Text(
+              Image.asset('assets/images/logoxepi.jpg',
+                  height: isMobile ? 35 : 50, width: isMobile ? 35 : 50),
+              SizedBox(width: isMobile ? 5.0 : 7.0),
+              Text(
                 'Catálogo',
                 style: TextStyle(
                     fontFamily: 'Montserrat',
-                    fontSize: 30,
+                    fontSize: isMobile ? 20 : 30,
                     color: Colors.white),
               ),
             ],
@@ -147,7 +176,8 @@ class _CategoryGalleryState extends State<CategoryGallery> {
                       sliver: SliverGrid(
                         gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                           crossAxisCount: crossAxisCount,
-                          childAspectRatio: 1.0,
+                          childAspectRatio:
+                              0.85, // More rectangular to fit square image + title
                           crossAxisSpacing: 20,
                           mainAxisSpacing: 20,
                         ),
@@ -160,7 +190,7 @@ class _CategoryGalleryState extends State<CategoryGallery> {
                               const Color(0xFFfec800), // Yellow
                               const Color(0xFF00acc0), // Blue
                             ];
-                            final colorIndex;
+                            final int colorIndex;
                             if (crossAxisCount == 2) {
                               colorIndex = index % colors.length;
                             } else {
@@ -172,6 +202,7 @@ class _CategoryGalleryState extends State<CategoryGallery> {
                             return CategoryCard(
                               categoryName: categoryName,
                               color: color,
+                              coverImageUrl: categoryCoverImages[categoryName],
                               onTap: () {
                                 Navigator.of(context).push(
                                   MaterialPageRoute(
@@ -191,8 +222,8 @@ class _CategoryGalleryState extends State<CategoryGallery> {
                         ),
                       ),
                     ),
-                    SliverToBoxAdapter(
-                      child: const Footer(),
+                    const SliverToBoxAdapter(
+                      child: Footer(),
                     ),
                   ],
                 );
@@ -215,17 +246,17 @@ class CategoryPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final screenWidth = MediaQuery.of(context).size.width;
-    final crossAxisCount =
-        screenWidth > 600 ? 4 : 2; // Adjust based on screen size.
+    final isMobile = screenWidth <= 600;
+    final crossAxisCount = isMobile ? 2 : 4; // Adjust based on screen size.
 
     return Scaffold(
       appBar: AppBar(
         backgroundColor: const Color(0xff2b2b2b),
         title: Text(
           categoryName.toUpperCase(),
-          style: const TextStyle(
+          style: TextStyle(
             fontFamily: 'Montserrat',
-            fontSize: 30,
+            fontSize: isMobile ? 18 : 30,
             color: Colors.white,
           ),
         ),
@@ -345,43 +376,94 @@ class CategoryCard extends StatelessWidget {
   final String categoryName;
   final Color color;
   final VoidCallback onTap;
+  final String? coverImageUrl;
 
   const CategoryCard({
     super.key,
     required this.categoryName,
     required this.color,
     required this.onTap,
+    this.coverImageUrl,
   });
 
   @override
   Widget build(BuildContext context) {
+    // Responsive sizing
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isMobile = screenWidth <= 600;
+
     return GestureDetector(
       onTap: onTap,
       child: Card(
         color: color,
+        clipBehavior: Clip.antiAlias,
         child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Spacer(),
-            const Icon(
-              Icons.image,
-              size: 80,
-              color: Colors.white,
-            ),
-            const Spacer(),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8.0),
+            // Display cover image at top if available, otherwise show icon
+            if (coverImageUrl != null)
+              Expanded(
+                flex: 3,
+                child: Image.network(
+                  coverImageUrl!,
+                  fit: BoxFit
+                      .cover, // cover to fill entire width on all screen sizes
+                  errorBuilder: (context, error, stackTrace) {
+                    // Fallback to icon if image fails to load
+                    return Container(
+                      color: color,
+                      child: Center(
+                        child: Icon(
+                          Icons.image,
+                          size: isMobile ? 60 : 80,
+                          color: Colors.white,
+                        ),
+                      ),
+                    );
+                  },
+                  loadingBuilder: (context, child, loadingProgress) {
+                    if (loadingProgress == null) return child;
+                    return Container(
+                      color: color,
+                      child: const Center(
+                        child: CircularProgressIndicator(
+                          color: Colors.white,
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              )
+            else
+              Expanded(
+                flex: 3,
+                child: Container(
+                  color: color,
+                  child: Center(
+                    child: Icon(
+                      Icons.image,
+                      size: isMobile ? 60 : 80,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+              ),
+            // Text container at bottom (similar to HTML .container)
+            Container(
+              padding: EdgeInsets.all(isMobile ? 8.0 : 16.0),
               child: Text(
                 categoryName.toUpperCase(),
                 textAlign: TextAlign.center,
-                style: const TextStyle(
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
                   color: Colors.white,
                   fontFamily: 'Montserrat',
-                  fontSize: 20,
+                  fontSize: isMobile ? 14 : 20,
+                  fontWeight: FontWeight.bold,
                 ),
               ),
             ),
-            const SizedBox(height: 20),
           ],
         ),
       ),
@@ -396,7 +478,7 @@ class Footer extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       color: const Color(0xff2b2b2b),
-      padding: const EdgeInsets.symmetric(vertical: 32.0, horizontal: 16.0),
+      padding: const EdgeInsets.symmetric(vertical: 32.0, horizontal: 40.0),
       child: LayoutBuilder(
         builder: (context, constraints) {
           bool isNarrow = constraints.maxWidth < 600;
@@ -409,7 +491,7 @@ class Footer extends StatelessWidget {
                   children: footerContent(titleSize, textSize, isNarrow),
                 )
               : Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  mainAxisAlignment: MainAxisAlignment.start,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: footerContent(titleSize, textSize, isNarrow),
                 );
@@ -432,25 +514,30 @@ class Footer extends StatelessWidget {
         ),
         const SizedBox(height: 8),
         LinkText(
-            text: 'Instagram: @xepi_gt',
+            text: '@xepi_gt',
             url: 'https://www.instagram.com/xepi_gt/',
-            textSize: textSize),
+            textSize: textSize,
+            icon: FontAwesomeIcons.instagram),
         LinkText(
-            text: 'Facebook: Xepi',
+            text: 'Xepi',
             url: 'https://www.facebook.com/XEPI-170757886730372/',
-            textSize: textSize),
+            textSize: textSize,
+            icon: FontAwesomeIcons.facebook),
         LinkText(
-            text: 'WhatsApp: 5885-8000',
+            text: '5885-8000',
             url: 'https://wa.me/50258858000',
-            textSize: textSize),
+            textSize: textSize,
+            icon: FontAwesomeIcons.whatsapp),
         LinkText(
-            text: 'Teléfono: 5885-8000',
+            text: '5885-8000',
             url: 'tel:58858000',
-            textSize: textSize),
+            textSize: textSize,
+            icon: FontAwesomeIcons.phone),
         LinkText(
-            text: 'Correo electrónico: dicosa.kiosko@gmail.com',
+            text: 'dicosa.kiosko@gmail.com',
             url: 'mailto:dicosa.kiosko@gmail.com',
-            textSize: textSize),
+            textSize: textSize,
+            icon: FontAwesomeIcons.envelope),
       ],
     );
 
@@ -467,7 +554,8 @@ class Footer extends StatelessWidget {
             text: 'C Comercial Century Plaza,',
             url:
                 'https://www.google.com/maps/place/Xepi/@14.5901288,-90.5208995,15z/data=!4m5!3m4!1s0x0:0x348f8b022618f5b8!8m2!3d14.5901288!4d-90.5208995',
-            textSize: textSize),
+            textSize: textSize,
+            icon: FontAwesomeIcons.mapMarkerAlt),
         Text('Kiosco 3, (frente a las gradas del primer nivel)',
             style: TextStyle(
                 color: Colors.white,
@@ -511,8 +599,9 @@ class Footer extends StatelessWidget {
       ];
     } else {
       return [
-        Flexible(child: contactInfo),
-        Flexible(child: addressInfo),
+        contactInfo,
+        const SizedBox(width: 120), // Add spacing between columns
+        addressInfo,
       ];
     }
   }
@@ -522,34 +611,93 @@ class LinkText extends StatefulWidget {
   final String text;
   final String url;
   final double textSize;
+  final IconData? icon;
 
   const LinkText({
     super.key,
     required this.text,
     required this.url,
     required this.textSize,
+    this.icon,
   });
 
   @override
   State<LinkText> createState() => _LinkTextState();
 }
 
-class _LinkTextState extends State<LinkText> {
+class _LinkTextState extends State<LinkText>
+    with SingleTickerProviderStateMixin {
   bool _isHovered = false;
+  late AnimationController _controller;
+  late Animation<Offset> _slideAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      duration: const Duration(milliseconds: 200),
+      vsync: this,
+    );
+
+    // Simple slide animation (no bounce/jump)
+    _slideAnimation = Tween<Offset>(
+      begin: Offset.zero,
+      end: const Offset(0.05, 0),
+    ).animate(CurvedAnimation(
+      parent: _controller,
+      curve: Curves.easeOut,
+    ));
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    return MouseRegion(
-      onEnter: (_) => setState(() => _isHovered = true),
-      onExit: (_) => setState(() => _isHovered = false),
-      child: GestureDetector(
-        onTap: () => launchUrl(Uri.parse(widget.url)),
-        child: Text(
-          widget.text,
-          style: TextStyle(
-            color: _isHovered ? const Color(0xFFfec800) : Colors.white,
-            fontFamily: 'Quicksand',
-            fontSize: widget.textSize,
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+          vertical: 6.0), // More spacing between lines
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click, // Show hand/pointer cursor
+        onEnter: (_) {
+          setState(() => _isHovered = true);
+          _controller.forward();
+        },
+        onExit: (_) {
+          setState(() => _isHovered = false);
+          _controller.reverse();
+        },
+        child: GestureDetector(
+          onTap: () => launchUrl(Uri.parse(widget.url)),
+          child: SlideTransition(
+            position: _slideAnimation,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (widget.icon != null) ...[
+                  Icon(
+                    widget.icon,
+                    color: _isHovered ? const Color(0xFFfec800) : Colors.white,
+                    size: widget.textSize + 4,
+                  ),
+                  const SizedBox(width: 8),
+                ],
+                Flexible(
+                  child: Text(
+                    widget.text,
+                    style: TextStyle(
+                      color:
+                          _isHovered ? const Color(0xFFfec800) : Colors.white,
+                      fontFamily: 'Quicksand',
+                      fontSize: widget.textSize,
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
