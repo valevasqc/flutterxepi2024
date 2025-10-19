@@ -4,7 +4,7 @@ const fs = require('fs');
 // GitHub Repository Details
 const username = 'valevasqc';
 const repo = 'xepi2024';
-const folders = ['cuadros','juguetes','cajitas','rompecabezas','rotulos']; // Add all categories here
+const folders = ['cuadros','juguetes','cajitas','rompecabezas','rotulos','aviones','casitas']; // Add all categories here
 const branch = 'main';
 
 async function fetchImageLinks() {
