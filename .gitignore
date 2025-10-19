@@ -11,6 +11,11 @@
 migrate_working_dir/
 client_secret_897371382001-57thb6m96ljaj76lu537rvt5ls7bq6eu.apps.googleusercontent.com.json
 
+# Templates and references
+admin/
+CART_EXAMPLE/
+HTML_UI_TEMPLATE/
+
 # IntelliJ related
 *.iml
 *.ipr

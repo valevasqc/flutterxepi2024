@@ -3,6 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:firebase_storage/firebase_storage.dart' as firebase_storage;
 import 'package:image_picker/image_picker.dart';
+import 'package:reorderable_grid_view/reorderable_grid_view.dart';
 
 class AdminDashboard extends StatefulWidget {
   const AdminDashboard({super.key});
@@ -493,39 +494,6 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
   Future<void> _logout() async {
     await FirebaseAuth.instance.signOut();
-  }
-
-  Future<void> _moveImage(int oldIndex, int newIndex) async {
-    if (_selectedCategory == null || oldIndex == newIndex) return;
-
-    setState(() {
-      final item = _orderedImages.removeAt(oldIndex);
-      _orderedImages.insert(newIndex, item);
-    });
-
-    // Rebuild the products map with new numeric keys
-    final Map<String, String> reorderedProducts = {};
-    for (int i = 0; i < _orderedImages.length; i++) {
-      reorderedProducts[i.toString()] = _orderedImages[i].value;
-    }
-
-    // Update Firebase
-    try {
-      await _databaseRef
-          .child(_selectedCategory!)
-          .child('products')
-          .set(reorderedProducts);
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Orden actualizado')),
-      );
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error actualizando orden: $e')),
-      );
-      // Revert on error
-      await _fetchImagesForCategory(_selectedCategory!);
-    }
   }
 
   @override
@@ -1335,7 +1303,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                   ),
                                 )
                               else
-                                GridView.builder(
+                                ReorderableGridView.builder(
                                   shrinkWrap: true,
                                   physics: const NeverScrollableScrollPhysics(),
                                   gridDelegate:
@@ -1346,11 +1314,50 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                     childAspectRatio: 1,
                                   ),
                                   itemCount: _orderedImages.length,
+                                  onReorder: (oldIndex, newIndex) async {
+                                    if (_selectedCategory == null) return;
+
+                                    setState(() {
+                                      final item =
+                                          _orderedImages.removeAt(oldIndex);
+                                      _orderedImages.insert(newIndex, item);
+                                    });
+
+                                    // Update Firebase with new order
+                                    final updates = <String, dynamic>{};
+                                    for (int i = 0;
+                                        i < _orderedImages.length;
+                                        i++) {
+                                      updates['$i'] = _orderedImages[i].value;
+                                    }
+
+                                    try {
+                                      await _databaseRef
+                                          .child(_selectedCategory!)
+                                          .child('products')
+                                          .set(updates);
+                                    } catch (e) {
+                                      if (mounted) {
+                                        ScaffoldMessenger.of(context)
+                                            .showSnackBar(
+                                          SnackBar(
+                                            content:
+                                                Text('Error al reordenar: $e'),
+                                            backgroundColor: Colors.red,
+                                          ),
+                                        );
+                                      }
+                                      // Revert on error
+                                      await _fetchImagesForCategory(
+                                          _selectedCategory!);
+                                    }
+                                  },
                                   itemBuilder: (context, index) {
                                     final entry = _orderedImages[index];
                                     final isPlaceholder =
                                         entry.key == '__placeholder__';
                                     return Stack(
+                                      key: ValueKey(entry.key),
                                       children: [
                                         ClipRRect(
                                           borderRadius:
@@ -1382,72 +1389,32 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                                   ),
                                                 ),
                                         ),
-                                        // Move Up Button
-                                        if (index > 0)
-                                          Positioned(
-                                            top: 4,
-                                            left: 4,
-                                            child: Container(
-                                              decoration: BoxDecoration(
-                                                color: Colors.blue.shade700,
-                                                borderRadius:
-                                                    BorderRadius.circular(20),
-                                                boxShadow: [
-                                                  BoxShadow(
-                                                    color: Colors.black
-                                                        .withOpacity(0.3),
-                                                    blurRadius: 4,
-                                                  ),
-                                                ],
-                                              ),
-                                              child: IconButton(
-                                                icon: const Icon(
-                                                    Icons.arrow_upward,
-                                                    color: Colors.white,
-                                                    size: 18),
-                                                padding: EdgeInsets.zero,
-                                                constraints:
-                                                    const BoxConstraints(
-                                                        minWidth: 32,
-                                                        minHeight: 32),
-                                                onPressed: () => _moveImage(
-                                                    index, index - 1),
-                                              ),
+                                        // Drag indicator
+                                        Positioned(
+                                          top: 4,
+                                          left: 4,
+                                          child: Container(
+                                            decoration: BoxDecoration(
+                                              color: Colors.blue.shade700
+                                                  .withOpacity(0.9),
+                                              borderRadius:
+                                                  BorderRadius.circular(20),
+                                              boxShadow: [
+                                                BoxShadow(
+                                                  color: Colors.black
+                                                      .withOpacity(0.3),
+                                                  blurRadius: 4,
+                                                ),
+                                              ],
+                                            ),
+                                            padding: const EdgeInsets.all(8),
+                                            child: const Icon(
+                                              Icons.drag_indicator,
+                                              color: Colors.white,
+                                              size: 18,
                                             ),
                                           ),
-                                        // Move Down Button
-                                        if (index < _orderedImages.length - 1)
-                                          Positioned(
-                                            bottom: 4,
-                                            left: 4,
-                                            child: Container(
-                                              decoration: BoxDecoration(
-                                                color: Colors.blue.shade700,
-                                                borderRadius:
-                                                    BorderRadius.circular(20),
-                                                boxShadow: [
-                                                  BoxShadow(
-                                                    color: Colors.black
-                                                        .withOpacity(0.3),
-                                                    blurRadius: 4,
-                                                  ),
-                                                ],
-                                              ),
-                                              child: IconButton(
-                                                icon: const Icon(
-                                                    Icons.arrow_downward,
-                                                    color: Colors.white,
-                                                    size: 18),
-                                                padding: EdgeInsets.zero,
-                                                constraints:
-                                                    const BoxConstraints(
-                                                        minWidth: 32,
-                                                        minHeight: 32),
-                                                onPressed: () => _moveImage(
-                                                    index, index + 1),
-                                              ),
-                                            ),
-                                          ),
+                                        ),
                                         // Delete Button
                                         Positioned(
                                           top: 4,
