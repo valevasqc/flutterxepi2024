@@ -1,8 +1,0 @@
-{
-  "rules": {
-    "images": {
-      ".read": true,
-      ".write": "auth != null && (auth.uid === '9QFhlKjJMkXMvrB0ISh1rghfPAl1' || auth.uid === 'c7EG7sjnBTVAH2oIf2G3vpdUkIH2')"
-    }
-  }
-}

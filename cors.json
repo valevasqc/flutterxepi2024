@@ -1,7 +1,0 @@
-[
-  {
-    "origin": ["http://localhost:*", "https://xepi-admin.web.app", "https://xepigt.com"],
-    "method": ["GET"],
-    "maxAgeSeconds": 3600
-  }
-]
