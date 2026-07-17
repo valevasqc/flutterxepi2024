@@ -1,7 +1,9 @@
 
 # Xepi Product Catalog
 
-Xepi Product Catalog is a web application for browsing and managing the product catalog of Xepi, a Guatemala-based retail store. The app is built with Flutter and deployed to the web using Firebase Hosting. Product images and data are managed via Firebase Storage and Realtime Database.
+Xepi Product Catalog is a web application for browsing the product catalog of Xepi, a Guatemala-based retail store. The app is built with Flutter and deployed to the web using Firebase Hosting. Catalog data lives in Cloud Firestore (managed by the separate admin system); product images are served from Firebase Storage.
+
+> Start here for project context: [XEPI_CLIENT_MASTER_DOCUMENTATION.md](XEPI_CLIENT_MASTER_DOCUMENTATION.md) · [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) · [docs/ROADMAP.md](docs/ROADMAP.md)
 
 ## Features
 
@@ -15,7 +17,7 @@ Xepi Product Catalog is a web application for browsing and managing the product 
 ## Architecture
 
 - **Flutter Web**: All UI code is in `lib/main.dart` using Material 3 and custom fonts.
-- **Firebase Realtime Database**: Stores product metadata and image URLs, organized by category.
+- **Cloud Firestore**: Stores categories, subcategories, and products (source of truth is the admin app).
 - **Firebase Storage**: Hosts all product images.
 - **Firebase Hosting**: Serves the built web app.
 - **Assets**: Custom fonts and logo in `assets/`.
@@ -50,9 +52,9 @@ Xepi Product Catalog is a web application for browsing and managing the product 
 ## Firebase Integration
 
 - Ensure you have access to the Firebase project and the correct `firebase_options.dart`.
-- Product images are uploaded to Firebase Storage.
-- Product metadata and image URLs are managed in Firebase Realtime Database under `images/{category}/{image_id}: url`.
-- Update security rules for local development if needed.
+- Product images are uploaded to Firebase Storage; their URLs live on the Firestore product/category documents.
+- Catalog data (categories, nested subcategories, products) is managed from the admin app in Cloud Firestore.
+- `firestore.rules` in this repo is a read-only snapshot of the live rules — the admin project owns and deploys them. Do not edit or deploy rules from here.
 
 ## Deployment
 
@@ -69,11 +71,8 @@ Xepi Product Catalog is a web application for browsing and managing the product 
 
 ## Maintenance & Updates
 
-- To update the product catalog:
-  1. Upload new images to Firebase Storage.
-  2. Update image URLs and metadata in Firebase Realtime Database.
-  3. The app will reflect changes on the next data fetch.
-- For new categories, update the database structure; the app UI is dynamic.
+- To update the product catalog: create/edit products and categories in the admin app; this client only reads.
+- For new categories, add them from the admin app; the client UI is dynamic.
 - Deprecated GitHub image logic is retained in `/archive/` for reference.
 
 ## License

@@ -5,6 +5,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'dart:async';
 import 'dart:convert';
 import 'firebase_options.dart';
 
@@ -19,7 +20,7 @@ class CartItem {
   final String categoryCode;
   final String subcategory;
   final String primaryCategory;
-  final double price;
+  double price; // mutable: re-resolved from publicCatalog when the cart opens
   final String imageUrl;
   final String? warehouseCode; // Warehouse code from Firestore
   int quantity;
@@ -81,7 +82,7 @@ class CartService {
   }
 
   List<CartItem> get items => List.unmodifiable(_items);
-  int get itemCount => _items.fold(0, (sum, item) => sum + item.quantity);
+  int get itemCount => _items.fold(0, (acc, item) => acc + item.quantity);
 
   /// Load cart from localStorage
   Future<void> loadCart() async {
@@ -147,6 +148,51 @@ class CartService {
     await _saveCart();
   }
 
+  /// Re-resolve item prices from the live publicCatalog mirror — prices are
+  /// snapshotted at add-time and go stale in localStorage. Items whose mirror
+  /// doc is gone (product deactivated/deleted) are removed from the cart.
+  /// Limitation: items priced by their subcategory's defaultPrice (no
+  /// priceOverride on the product) keep the stored price.
+  Future<void> refreshPrices() async {
+    if (_items.isEmpty) return;
+    try {
+      final firestore = FirebaseFirestore.instance;
+      final barcodes = _items.map((item) => item.barcode).toList();
+      final mirrorDocs = <String, Map<String, dynamic>>{};
+      // whereIn accepts at most 10 values per query
+      for (var i = 0; i < barcodes.length; i += 10) {
+        final chunk = barcodes.sublist(
+            i, i + 10 > barcodes.length ? barcodes.length : i + 10);
+        final snapshot = await firestore
+            .collection('publicCatalog')
+            .where(FieldPath.documentId, whereIn: chunk)
+            .get();
+        for (final doc in snapshot.docs) {
+          mirrorDocs[doc.id] = doc.data();
+        }
+      }
+
+      var changed = false;
+      _items.removeWhere((item) {
+        final data = mirrorDocs[item.barcode];
+        if (data == null) {
+          changed = true;
+          return true; // no longer in the public catalog
+        }
+        final override = (data['priceOverride'] as num?)?.toDouble();
+        if (override != null && override != item.price) {
+          item.price = override;
+          changed = true;
+        }
+        return false;
+      });
+
+      if (changed) await _saveCart();
+    } catch (e) {
+      debugPrint('Error refreshing cart prices: $e');
+    }
+  }
+
   /// Check if item is in cart
   bool isInCart(String barcode) {
     return _items.any((item) => item.barcode == barcode);
@@ -170,32 +216,28 @@ class CartService {
     return item.quantity;
   }
 
-  /// Get total quantity of all LAT-2030 and LAT-1530 items combined
+  /// Get total quantity of all bulk-pricing-eligible items combined
   int _getTotalBulkPricingQuantity() {
     return _items
-        .where((item) =>
-            item.categoryCode == 'LAT-2030' || item.categoryCode == 'LAT-1530')
-        .fold(0, (sum, item) => sum + item.quantity);
+        .where((item) => BulkPricing.appliesTo(item.categoryCode))
+        .fold(0, (acc, item) => acc + item.quantity);
   }
 
-  /// Calculate bulk price for cuadros de latón (LAT-2030 and LAT-1530)
-  /// Pricing applies across ALL LAT-2030 and LAT-1530 items combined:
-  /// 1 total unit = Q35 each, 2+ total units = Q30 each, 5+ total units = Q25 each
-  double getBulkPrice(String categoryCode, int itemQuantity, double basePrice) {
-    // Only apply bulk pricing to specific cuadros categories
-    if (categoryCode != 'LAT-2030' && categoryCode != 'LAT-1530') {
+  /// Calculate bulk price for cuadros de latón (see [BulkPricing]).
+  /// Tiers apply across ALL eligible items combined.
+  double getBulkPrice(String categoryCode, double basePrice) {
+    if (!BulkPricing.appliesTo(categoryCode)) {
       return basePrice;
     }
 
-    // Get total quantity across ALL LAT-2030 and LAT-1530 products
     final totalQuantity = _getTotalBulkPricingQuantity();
 
-    if (totalQuantity >= 5) {
-      return 25.0;
-    } else if (totalQuantity >= 2) {
-      return 30.0;
+    if (totalQuantity >= BulkPricing.bundleThreshold) {
+      return BulkPricing.bundlePrice;
+    } else if (totalQuantity >= BulkPricing.pairThreshold) {
+      return BulkPricing.pairPrice;
     } else {
-      return 35.0;
+      return BulkPricing.singlePrice;
     }
   }
 
@@ -203,8 +245,7 @@ class CartService {
   double calculateTotal() {
     double total = 0;
     for (final item in _items) {
-      final unitPrice =
-          getBulkPrice(item.categoryCode, item.quantity, item.price);
+      final unitPrice = getBulkPrice(item.categoryCode, item.price);
       total += unitPrice * item.quantity;
     }
     return total;
@@ -212,7 +253,7 @@ class CartService {
 
   /// Get the effective price for an item (with bulk discount applied)
   double getEffectivePrice(CartItem item) {
-    return getBulkPrice(item.categoryCode, item.quantity, item.price);
+    return getBulkPrice(item.categoryCode, item.price);
   }
 
   /// Add listener for cart changes
@@ -253,6 +294,53 @@ class Breakpoints {
   static const double desktop = 1200.0;
 }
 
+/// Bulk pricing tiers for cuadros de latón.
+/// Values load from Firestore `config/bulkPricing` at startup so admin
+/// controls them; the initializers below are only the offline fallback.
+/// Single source for both the pricing logic and the banner text so they
+/// cannot drift apart.
+class BulkPricing {
+  static List<String> categoryCodes = ['LAT-2030', 'LAT-1530'];
+  static double singlePrice = 35.0;
+  static double pairPrice = 30.0;
+  static double bundlePrice = 25.0;
+  static int pairThreshold = 2;
+  static int bundleThreshold = 5;
+
+  static bool appliesTo(String categoryCode) =>
+      categoryCodes.contains(categoryCode);
+
+  static String get bannerText =>
+      'Precios especiales: 1 cuadro Q${singlePrice.toStringAsFixed(0)} • '
+      '$pairThreshold+ cuadros Q${pairPrice.toStringAsFixed(0)} c/u • '
+      '$bundleThreshold+ cuadros Q${bundlePrice.toStringAsFixed(0)} c/u';
+
+  /// Overwrites the fallback tiers with the admin-controlled values in
+  /// `config/bulkPricing`. A missing doc or missing fields keep the fallbacks.
+  static Future<void> load() async {
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('config')
+          .doc('bulkPricing')
+          .get();
+      final data = snapshot.data();
+      if (data == null) return;
+      categoryCodes = (data['categoryCodes'] as List<dynamic>?)
+              ?.map((code) => code.toString())
+              .toList() ??
+          categoryCodes;
+      singlePrice = (data['singlePrice'] as num?)?.toDouble() ?? singlePrice;
+      pairPrice = (data['pairPrice'] as num?)?.toDouble() ?? pairPrice;
+      bundlePrice = (data['bundlePrice'] as num?)?.toDouble() ?? bundlePrice;
+      pairThreshold = (data['pairThreshold'] as num?)?.toInt() ?? pairThreshold;
+      bundleThreshold =
+          (data['bundleThreshold'] as num?)?.toInt() ?? bundleThreshold;
+    } catch (e) {
+      debugPrint('Error loading bulk pricing config: $e');
+    }
+  }
+}
+
 // ============================================================================
 // MAIN APP
 // ============================================================================
@@ -261,6 +349,8 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   await CartService.instance.loadCart(); // Load cart from localStorage
+  unawaited(
+      BulkPricing.load()); // admin-controlled tiers; fallback until loaded
   runApp(const MyApp());
 }
 
@@ -407,9 +497,9 @@ class _CategoryGalleryState extends State<CategoryGallery> {
                       sliver: SliverGrid(
                         gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                           crossAxisCount: crossAxisCount,
-                          childAspectRatio: 0.85,
                           crossAxisSpacing: 20,
                           mainAxisSpacing: 20,
+                          childAspectRatio: 0.92,
                         ),
                         delegate: SliverChildBuilderDelegate(
                           (context, index) {
@@ -467,14 +557,20 @@ class _CategoryGalleryState extends State<CategoryGallery> {
         .collection('subcategories')
         .get();
 
-    if (snapshot.docs.isEmpty) {
-      // No subcategories found
+    // Only route based on active subcategories, matching what
+    // SubcategoriesPage and the products query will actually show
+    final activeDocs = snapshot.docs
+        .where((doc) => (doc.data()['isActive'] as bool? ?? true) == true)
+        .toList();
+
+    if (activeDocs.isEmpty) {
+      // No active subcategories found
       return;
     }
 
-    if (snapshot.docs.length == 1) {
+    if (activeDocs.length == 1) {
       // Only one subcategory - skip to products page directly
-      final categoryData = snapshot.docs.first.data();
+      final categoryData = activeDocs.first.data();
       if (!context.mounted) return;
       Navigator.push(
         context,
@@ -617,9 +713,9 @@ class _SubcategoriesPageState extends State<SubcategoriesPage> {
                       sliver: SliverGrid(
                         gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                           crossAxisCount: crossAxisCount,
-                          childAspectRatio: 0.85,
                           crossAxisSpacing: 20,
                           mainAxisSpacing: 20,
+                          childAspectRatio: 0.92,
                         ),
                         delegate: SliverChildBuilderDelegate(
                           (context, index) {
@@ -733,10 +829,14 @@ class _ProductsPageState extends State<ProductsPage> {
     }
 
     try {
+      // publicCatalog only contains active products, so no isActive filter.
+      // orderBy needs the (categoryCode, displayOrder) composite index and
+      // silently drops docs missing displayOrder — the backfill script audits
+      // for that.
       var query = _firestore
-          .collection('products')
+          .collection('publicCatalog')
           .where('categoryCode', isEqualTo: widget.categoryCode)
-          .where('isActive', isEqualTo: true)
+          .orderBy('displayOrder')
           .limit(_pageSize);
 
       final snapshot = await query.get();
@@ -766,9 +866,6 @@ class _ProductsPageState extends State<ProductsPage> {
         };
       }).toList();
 
-      products.sort((a, b) =>
-          (a['displayOrder'] as int).compareTo(b['displayOrder'] as int));
-
       setState(() {
         _products = products;
         _lastDocument = snapshot.docs.isNotEmpty ? snapshot.docs.last : null;
@@ -788,9 +885,9 @@ class _ProductsPageState extends State<ProductsPage> {
 
     try {
       final snapshot = await _firestore
-          .collection('products')
+          .collection('publicCatalog')
           .where('categoryCode', isEqualTo: widget.categoryCode)
-          .where('isActive', isEqualTo: true)
+          .orderBy('displayOrder')
           .startAfterDocument(_lastDocument!)
           .limit(_pageSize)
           .get();
@@ -821,6 +918,7 @@ class _ProductsPageState extends State<ProductsPage> {
       }).toList();
 
       setState(() {
+        // Query is orderBy(displayOrder), so pages arrive already in order.
         _products.addAll(newProducts);
         _lastDocument = snapshot.docs.last;
         _hasMore = snapshot.docs.length == _pageSize;
@@ -839,8 +937,7 @@ class _ProductsPageState extends State<ProductsPage> {
     final isCuadros =
         widget.primaryCategory.toLowerCase().contains('cuadros') ||
             widget.primaryCategory.toLowerCase().contains('latón');
-    final showBulkPricing =
-        widget.categoryCode == 'LAT-2030' || widget.categoryCode == 'LAT-1530';
+    final showBulkPricing = BulkPricing.appliesTo(widget.categoryCode);
 
     return Scaffold(
       appBar: AppBar(
@@ -892,7 +989,7 @@ class _ProductsPageState extends State<ProductsPage> {
                         const SizedBox(width: 8),
                         Expanded(
                           child: Text(
-                            'Precios especiales: 1 cuadro Q35 • 2+ cuadros Q30 c/u • 5+ cuadros Q25 c/u',
+                            BulkPricing.bannerText,
                             style: TextStyle(
                               fontFamily: 'Quicksand',
                               fontSize: isMobile ? 12 : 14,
@@ -916,7 +1013,7 @@ class _ProductsPageState extends State<ProductsPage> {
                         crossAxisCount: crossAxisCount,
                         crossAxisSpacing: 8,
                         mainAxisSpacing: 8,
-                        childAspectRatio: 1.0,
+                        childAspectRatio: 0.75,
                       ),
                       itemCount: _products.length + (_hasMore ? 1 : 0),
                       itemBuilder: (context, index) {
@@ -979,10 +1076,82 @@ class _SearchPageState extends State<SearchPage> {
   bool _isSearching = false;
   bool _hasSearched = false;
 
+  /// App-level catalog cache: survives page visits, expires after
+  /// [_catalogCacheTtl]. Every keystroke filters this cached list instead
+  /// of re-reading the whole collection.
+  static List<Map<String, dynamic>>? _catalogCache;
+  static DateTime? _catalogFetchedAt;
+  static const _catalogCacheTtl = Duration(minutes: 10);
+  Timer? _debounce;
+
   @override
   void dispose() {
+    _debounce?.cancel();
     _searchController.dispose();
     super.dispose();
+  }
+
+  void _onQueryChanged(String value) {
+    setState(() {}); // refresh the clear-button visibility
+    _debounce?.cancel();
+    if (value.trim().isEmpty) {
+      _performSearch(value);
+      return;
+    }
+    _debounce = Timer(const Duration(milliseconds: 300), () {
+      if (mounted) _performSearch(value);
+    });
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchAllProducts() async {
+    final cached = _catalogCache;
+    if (cached != null &&
+        _catalogFetchedAt != null &&
+        DateTime.now().difference(_catalogFetchedAt!) < _catalogCacheTtl) {
+      return cached;
+    }
+
+    // publicCatalog only contains active products.
+    final snapshot = await _firestore.collection('publicCatalog').get();
+
+    final catalog = snapshot.docs.map((doc) {
+      final data = doc.data();
+      final images = data['images'] as List<dynamic>?;
+      final primaryImage = images?.isNotEmpty == true
+          ? images![0] as String?
+          : data['primaryImageUrl'] as String?;
+      final temas = (data['temas'] as List<dynamic>?)
+              ?.map((t) => t.toString())
+              .toList() ??
+          [];
+
+      return {
+        'barcode': data['barcode'],
+        'name': data['name'],
+        'imageUrl': primaryImage,
+        'priceOverride': data['priceOverride'],
+        'categoryCode': data['categoryCode'],
+        'subcategory': data['subcategory'],
+        'primaryCategory': data['primaryCategory'],
+        'warehouseCode': data['warehouseCode'],
+        'defaultPrice': data['defaultPrice'],
+        // Newline-joined so a query can't accidentally match across two
+        // adjacent fields
+        'searchText': [
+          data['name'] as String? ?? '',
+          data['barcode'] as String? ?? '',
+          data['categoryCode'] as String? ?? '',
+          data['warehouseCode'] as String? ?? '',
+          data['primaryCategory'] as String? ?? '',
+          data['subcategory'] as String? ?? '',
+          ...temas,
+        ].join('\n').toLowerCase(),
+      };
+    }).toList();
+
+    _catalogCache = catalog;
+    _catalogFetchedAt = DateTime.now();
+    return catalog;
   }
 
   Future<void> _performSearch(String query) async {
@@ -1000,58 +1169,13 @@ class _SearchPageState extends State<SearchPage> {
     });
 
     try {
-      // Search in products collection
-      final snapshot = await _firestore
-          .collection('products')
-          .where('isActive', isEqualTo: true)
-          .get();
+      final catalog = await _fetchAllProducts();
 
       final queryLower = query.toLowerCase();
-
-      // Filter results locally for better search across multiple fields
-      final results = snapshot.docs.where((doc) {
-        final data = doc.data();
-        final name = (data['name'] as String?)?.toLowerCase() ?? '';
-        final barcode = (data['barcode'] as String?)?.toLowerCase() ?? '';
-        final categoryCode =
-            (data['categoryCode'] as String?)?.toLowerCase() ?? '';
-        final warehouseCode =
-            (data['warehouseCode'] as String?)?.toLowerCase() ?? '';
-        final temas = (data['temas'] as List<dynamic>?)
-                ?.map((t) => t.toString().toLowerCase())
-                .toList() ??
-            [];
-        final primaryCategory =
-            (data['primaryCategory'] as String?)?.toLowerCase() ?? '';
-        final subcategory =
-            (data['subcategory'] as String?)?.toLowerCase() ?? '';
-
-        return name.contains(queryLower) ||
-            barcode.contains(queryLower) ||
-            categoryCode.contains(queryLower) ||
-            warehouseCode.contains(queryLower) ||
-            primaryCategory.contains(queryLower) ||
-            subcategory.contains(queryLower) ||
-            temas.any((tema) => tema.contains(queryLower));
-      }).map((doc) {
-        final data = doc.data();
-        final images = data['images'] as List<dynamic>?;
-        final primaryImage = images?.isNotEmpty == true
-            ? images![0] as String?
-            : data['primaryImageUrl'] as String?;
-
-        return {
-          'barcode': data['barcode'],
-          'name': data['name'],
-          'imageUrl': primaryImage,
-          'priceOverride': data['priceOverride'],
-          'categoryCode': data['categoryCode'],
-          'subcategory': data['subcategory'],
-          'primaryCategory': data['primaryCategory'],
-          'warehouseCode': data['warehouseCode'],
-          'defaultPrice': data['defaultPrice'],
-        };
-      }).toList();
+      final results = catalog
+          .where((product) =>
+              (product['searchText'] as String).contains(queryLower))
+          .toList();
 
       setState(() {
         _searchResults = results;
@@ -1090,10 +1214,7 @@ class _SearchPageState extends State<SearchPage> {
                   )
                 : null,
           ),
-          onChanged: (value) {
-            setState(() {});
-            _performSearch(value);
-          },
+          onChanged: _onQueryChanged,
         ),
         iconTheme: const IconThemeData(color: Colors.white),
         actions: const [
@@ -1152,7 +1273,7 @@ class _SearchPageState extends State<SearchPage> {
                         crossAxisCount: isMobile ? 2 : 4,
                         crossAxisSpacing: 8,
                         mainAxisSpacing: 8,
-                        childAspectRatio: 1.0,
+                        childAspectRatio: 0.75,
                       ),
                       itemCount: _searchResults.length,
                       itemBuilder: (context, index) {
@@ -1235,7 +1356,9 @@ class _ProductThumbnailState extends State<_ProductThumbnail> {
   Future<void> _addToCart() async {
     final item = CartItem(
       barcode: widget.barcode,
-      name: widget.name ?? 'Sin nombre',
+      // Cuadros hide names in the UI (name arrives null); display paths fall
+      // back to warehouseCode, then barcode — never a literal placeholder.
+      name: widget.name ?? '',
       categoryCode: widget.categoryCode,
       subcategory: widget.subcategory,
       primaryCategory: widget.primaryCategory,
@@ -1267,7 +1390,8 @@ class _ProductThumbnailState extends State<_ProductThumbnail> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Expanded(
+          AspectRatio(
+            aspectRatio: 1.0,
             child: GestureDetector(
               onTap: widget.onTap,
               child: ClipRRect(
@@ -1517,27 +1641,34 @@ class CategoryCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Cover image or placeholder icon
-            Expanded(
-              flex: 3,
-              child: coverImageUrl != null
-                  ? CachedNetworkImage(
-                      imageUrl: coverImageUrl!,
-                      fit: BoxFit.cover,
-                      placeholder: (context, url) => Container(
-                        color: color,
-                        child: const Center(
-                          child: CircularProgressIndicator(color: Colors.white),
+            // Cover image - square
+            SizedBox(
+              width: double.infinity,
+              child: AspectRatio(
+                aspectRatio: 1.0,
+                child: coverImageUrl != null
+                    ? CachedNetworkImage(
+                        imageUrl: coverImageUrl!,
+                        fit: BoxFit.cover,
+                        placeholder: (context, url) => Container(
+                          color: color,
+                          child: const Center(
+                            child:
+                                CircularProgressIndicator(color: Colors.white),
+                          ),
                         ),
-                      ),
-                      errorWidget: (context, url, error) =>
-                          _buildPlaceholderIcon(color, iconSize),
-                    )
-                  : _buildPlaceholderIcon(color, iconSize),
+                        errorWidget: (context, url, error) =>
+                            _buildPlaceholderIcon(color, iconSize),
+                      )
+                    : _buildPlaceholderIcon(color, iconSize),
+              ),
             ),
             // Category name
             Container(
-              padding: EdgeInsets.all(isMobile ? 8.0 : 16.0),
+              padding: EdgeInsets.symmetric(
+                  horizontal: isMobile ? 4.0 : 8.0,
+                  vertical: isMobile ? 2.0 : 3.0),
+              // TODO add padding without it overflowing
               child: Text(
                 categoryName.toUpperCase(),
                 textAlign: TextAlign.center,
@@ -1546,8 +1677,9 @@ class CategoryCard extends StatelessWidget {
                 style: TextStyle(
                   color: Colors.white,
                   fontFamily: 'Montserrat',
-                  fontSize: isMobile ? 14 : 20,
+                  fontSize: isMobile ? 12 : 18,
                   fontWeight: FontWeight.bold,
+                  height: 1.1,
                 ),
               ),
             ),
@@ -1830,6 +1962,9 @@ class _CartPageState extends State<CartPage> {
   void initState() {
     super.initState();
     _cartService.addListener(_onCartChanged);
+    // Prices are snapshotted at add-time; sync with the live catalog before
+    // the customer reviews/sends the order (notifies listeners on change).
+    _cartService.refreshPrices();
   }
 
   @override
@@ -1873,11 +2008,14 @@ class _CartPageState extends State<CartPage> {
         final itemTotal = effectivePrice * item.quantity;
         total += itemTotal;
 
-        // Use warehouse code if available, otherwise show product name
+        // Warehouse code if available, then product name, then barcode
+        // (cuadros carry no name — see _addToCart).
         final displayText =
             item.warehouseCode != null && item.warehouseCode!.isNotEmpty
                 ? 'Código: ${item.warehouseCode}'
-                : item.name;
+                : item.name.isNotEmpty
+                    ? item.name
+                    : 'Código: ${item.barcode}';
 
         message +=
             '  • $displayText - ${item.quantity} x Q${effectivePrice.toStringAsFixed(2)} = Q${itemTotal.toStringAsFixed(2)}\n';
@@ -1888,7 +2026,7 @@ class _CartPageState extends State<CartPage> {
     message += '*Total: Q${total.toStringAsFixed(2)}*';
 
     // Launch WhatsApp
-    final phoneNumber = '50258858000';
+    const phoneNumber = '50258858000';
     final encodedMessage = Uri.encodeComponent(message);
     final whatsappUrl = 'https://wa.me/$phoneNumber?text=$encodedMessage';
 
@@ -2026,7 +2164,7 @@ class _CartPageState extends State<CartPage> {
                                       imageUrl: item.imageUrl,
                                       width: 80,
                                       height: 80,
-                                      fit: BoxFit.cover,
+                                      fit: BoxFit.contain,
                                       placeholder: (context, url) => Container(
                                         width: 80,
                                         height: 80,
@@ -2065,7 +2203,9 @@ class _CartPageState extends State<CartPage> {
                                           item.warehouseCode != null &&
                                                   item.warehouseCode!.isNotEmpty
                                               ? 'Código: ${item.warehouseCode}'
-                                              : item.name,
+                                              : item.name.isNotEmpty
+                                                  ? item.name
+                                                  : 'Código: ${item.barcode}',
                                           style: TextStyle(
                                             fontFamily: 'Quicksand',
                                             fontSize: 14,
@@ -2116,10 +2256,10 @@ class _CartPageState extends State<CartPage> {
                                                         BorderRadius.circular(
                                                             12),
                                                   ),
-                                                  child: Row(
+                                                  child: const Row(
                                                     mainAxisSize:
                                                         MainAxisSize.min,
-                                                    children: const [
+                                                    children: [
                                                       Icon(
                                                         Icons.local_offer,
                                                         size: 12,
